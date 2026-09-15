@@ -1,0 +1,31 @@
+The changing is instead of using normal smolvlm2, we use smolvlm2 that get quantizationed with ollma. Follow instrusction bellow :
+
+
+
+1. install missing dependensices
+
+wsl
+source ./glass/glass/bin/activate
+uv pip install requests
+
+
+
+2. Clone ollama (run in wsl terminal)
+
+sudo apt-get update && sudo apt-get install -y cmake build-essential One-time
+
+git clone https://github.com/ggerganov/llama.cpp.git
+
+
+3. Run the server
+
+cd llama.cpp
+cmake -B build -DGGML_CUDA=OFF
+cmake --build build --config Release -j $(nproc) --target llama-server
+
+
+4. Run the fix python file
+
+cd ..
+python Function1_chatbot_fix.py --image test/photo/japan.jpeg --audio test/audio/mieu_ta_khung_canh.mp3
+
