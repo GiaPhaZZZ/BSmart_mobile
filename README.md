@@ -1,7 +1,9 @@
 # BSmart_mobile
 
 
-
+<p align="center">
+  <img src="photo.png" alt="AI Voice Assistant" width="600">
+</p>
 
 
 # 🛠️ Requirements
