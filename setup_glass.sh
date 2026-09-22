@@ -39,6 +39,7 @@ uv pip install --python "$PY" \
     librosa \
     huggingface-hub \
     requests \
+    ultralytics \
     ctranslate2
 
 # --- llama-cpp-python (runs the SmolVLM2 / Qwen2.5-VL GGUF files) -------

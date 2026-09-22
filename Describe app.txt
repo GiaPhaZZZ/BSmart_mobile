@@ -1,0 +1,42 @@
+Miêu tả sơ bộ về app :
+
+_ Thực hiện 3 mode chính :
++ mode 1 : detect tiền qua yolo26s
++ mode 2 : miêu tả khung cảnh trước mặt = smolvlm2 (fix prompt)
++ mode 3 : quét qr tới ngân hàng
+
+_ Bản thân khi vào app thì sẽ luôn vào chế độ chụp đầu tiên, tự vận hành được. Thao tác đổi bằng mode bằng nút hoặc các thành phần phụ sẽ là ưu tiên sau.
+
+_ Có cơ chế tích hợp addtional devices qua BLE (thiết bị chụp ảnh nhỏ)
++ Nhận ảnh qua ble
++ Nhận tín hiệu từ máy kia gửi qua để đổi mode
+
+=> Toàn bộ mô hình chạy local, dự kiến yolo 2-3s và smol 5-8s.
+
+_ Mode 1 : detect tiền
++ Nhận vào ảnh size 224x244
++ Chạy yolo detect
++ Nếu ra nhiều label cùng lúc, ví dụ 500k và 100k vnd thì sẽ play audio 500.mp3 + and.mp3 + 100.mp3
++ ko detect ra thì không trả về gì và chơi audio error.mp3
+
+
+_ mode 2 : miêu tả khung cảnh trước mặ
++ Nhận vào ảnh size 224 x 224
++ Prompt sẵn có (embed mặc định là descirbe secne) đưa vào smolv cùng ảnh.
++ Smolv trả lời
++ Dịch sang tiếng việt 
++ Dùng piper en-viet tạo thành audio và chơi
+
+
+=> LƯU ý, ko lưu audio, lưu ảnh vào bộ sưu tập.
+
+_ Mode 3 : Quet qr
++ Nhận vào ảnh 224x224
++ Biết được đây có phải là qr ngân hàngkhong6
++ CHơi audio money.mp3 để hỏi user muốn chuyển bao nhiêu
++ Bắt đầu ghi âm
++ Có audio dùng STT cho ra số tền để chuyển
++ Dùng TTS cho ra audio xác nhận lần nữa theo chông thức "Xác nhận chuyển (number of money) ?"
++ Direct tới app ngân hàng mong muốn với số tiền muốn chuyển.
+
+

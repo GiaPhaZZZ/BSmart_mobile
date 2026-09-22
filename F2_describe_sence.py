@@ -1,40 +1,37 @@
 #!/usr/bin/env python3
 """
-glass pipeline — offline blind-assistant demo, single image + single spoken question.
+glass pipeline — offline blind-assistant demo, single image, fixed prompt.
 
 Flow:
-    audio (vi, spoken question)  --[PhoWhisper CT2 int8]--> vi text
-    vi text                      --[EnViT5 CT2 int8]------> en text
-    image + en text (prompt)     --[SmolVLM2, quantized GGUF via llama.cpp llama-server]--> en description
+    fixed vi prompt "mieu ta khung canh phia truoc"  (hardcoded, no ASR)
+    image + en prompt             --[SmolVLM2, quantized GGUF via llama.cpp llama-server]--> en description
     en description                --[EnViT5 CT2 int8]------> vi description
     vi description                --[Piper TTS]-------------> out.wav
 
-CHANGE FROM ORIGINAL: the vision-language step no longer loads SmolVLM2 through
-transformers/torch. Instead it talks to a `llama-server` process (from
-llama.cpp) serving a quantized GGUF build of SmolVLM2 over its OpenAI-compatible
-`/v1/chat/completions` endpoint, the same way the notebook snippet does. This
-is faster and lighter (int4/int8 GGUF + mmap, no torch model resident in
-Python) at some cost in accuracy vs the fp16 transformers model. Everything
-else in the pipeline (ASR, translation, TTS, CLI/--serve behavior) is
-unchanged.
+CHANGE FROM PREVIOUS VERSION: speech-to-text (PhoWhisper) and audio input are
+removed entirely. The spoken question is no longer transcribed — there is a
+single fixed prompt, "mieu ta khung canh phia truoc" (describe the scene
+ahead), sent straight to the vision-language step in its English form. The
+model is also asked to actively warn about hazards (doors, stairs, steps,
+curbs, obstacles) in front of the user, not just describe the scene/objects.
+Everything else in the pipeline (vision-language via llama-server, EnViT5
+output translation, Piper TTS, CLI/--serve behavior) is unchanged.
 
 Run inside the glass venv (activate it first, or call glass/bin/python directly):
 
     source glass/glass/bin/activate
-    python pipeline.py --image test/photo/pavement_5.webp --audio test/audio/mieu_ta_khung_canh.mp3
+    python pipeline.py --image test/photo/pavement_5.webp
 
 Persistent mode (load all models once, run many queries without reloading):
 
     python pipeline.py --serve
     # then feed it JSON lines on stdin, one query per line:
-    {"image": "test/photo/pavement_5.webp", "audio": "test/audio/mieu_ta_khung_canh.mp3"}
-    {"image": "test/photo/other.webp", "audio": "test/audio/other.mp3"}
+    {"image": "test/photo/pavement_5.webp"}
+    {"image": "test/photo/other.webp"}
     (Ctrl-D or an empty line to stop.)
 
 Prerequisites (run once, before this script will work):
 
-    ct2-transformers-converter --model vinai/PhoWhisper-tiny \\
-        --output_dir phowhisper-ct2-int8 --quantization int8
     ct2-transformers-converter --model VietAI/envit5-translation \\
         --output_dir envit5-ct2-int8 --quantization int8
 
@@ -51,10 +48,6 @@ Prerequisites (run once, before this script will work):
 
 Note (WSL): use forward slashes for paths (test/photo/..., not test\\photo\\...) —
 backslash is a Windows path separator and isn't interpreted that way on Linux/WSL.
-
-Note (mp3 input): librosa/soundfile read mp3 via libsndfile>=1.1 or, as a
-fallback, via ffmpeg (audioread backend). If loading the .mp3 raises an
-error, install ffmpeg: sudo apt install ffmpeg
 """
 import argparse
 import atexit
@@ -70,24 +63,25 @@ import wave
 from pathlib import Path
 
 import ctranslate2
-import librosa
 import requests
 import torch
 from PIL import Image
-from transformers import AutoTokenizer, WhisperProcessor
+from transformers import AutoTokenizer
 from piper import PiperVoice
 
 BASE_DIR = Path(__file__).resolve().parent
 
 # ---------- Config ----------
-ASR_MODEL_PATH = "vinai/PhoWhisper-tiny"           # for feature extractor + tokenizer only
 TRANSLATE_MODEL_PATH = "VietAI/envit5-translation"  # for tokenizer only
 
-ASR_CT2_DIR = BASE_DIR / "phowhisper-ct2-int8"
 TRANSLATE_CT2_DIR = BASE_DIR / "envit5-ct2-int8"
 ENVIT5_TOKENIZER_CACHE = BASE_DIR / ".cache" / "envit5_patched"
 
 PIPER_VOICE_PATH = BASE_DIR / "voices" / "vi_VN-vais1000-medium.onnx"
+
+# Fixed prompt: speech input/ASR is gone, this is the only question asked.
+FIXED_PROMPT_VI = "mieu ta khung canh phia truoc"
+FIXED_PROMPT_EN = "Describe the scene ahead of me."
 
 # --- Quantized SmolVLM2 served via llama.cpp's llama-server ---
 # Easiest path: let llama-server auto-download the GGUF (+ mmproj) from Hugging
@@ -105,13 +99,25 @@ LLAMA_SERVER_URL = f"http://{LLAMA_SERVER_HOST}:{LLAMA_SERVER_PORT}"
 LLAMA_STARTUP_TIMEOUT_S = 60
 LLAMA_REQUEST_TIMEOUT_S = 120
 
-ASR_SAMPLE_RATE = 16000
 MAX_SIDE = 384
-MAX_NEW_TOKENS = 80    # ceiling/safety net, not the target length
+MAX_NEW_TOKENS = 140   # ceiling/safety net for 2-3 sentences, not the target length
 TRANSLATE_MAX_LENGTH = 256
-ASR_MAX_LENGTH = 200
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# System prompt for the vision-language step: describe the scene/objects AND
+# actively call out hazards (doors, stairs, obstacles, etc.) ahead — this is
+# not hazard-detection-only, it's a general scene/object description for
+# blind users that also surfaces hazards when present.
+VLM_SYSTEM_PROMPT = (
+    "You are describing a photo to a blind person standing in front of the scene. "
+    "Answer in 2 to 3 simple, complete sentences (max ~60 words). "
+    "First describe the scene and the most important objects in it. "
+    "Then, if — and only if — you see a hazard such as a door, stairs, steps, "
+    "a curb, a low obstacle, or anything else that could cause a trip, fall, or "
+    "collision ahead, add a clear warning, e.g. 'Warning: there are stairs ahead.' "
+    "If there is no such hazard, do not mention one."
+)
 
 
 def log(msg: str):
@@ -259,16 +265,6 @@ def ensure_llama_server(server_bin: Path, host: str, port: int, url: str,
 def _load_all_models(llama_server_bin=LLAMA_SERVER_BIN, llama_hf_repo=LLAMA_HF_REPO,
                       llama_model_gguf=LLAMA_MODEL_GGUF, llama_mmproj_gguf=LLAMA_MMPROJ_GGUF,
                       llama_host=LLAMA_SERVER_HOST, llama_port=LLAMA_SERVER_PORT):
-    log("Loading PhoWhisper feature extractor + tokenizer (CT2 backend)...")
-    if not ASR_CT2_DIR.exists():
-        raise FileNotFoundError(
-            f"{ASR_CT2_DIR} not found — run:\n"
-            f"  ct2-transformers-converter --model {ASR_MODEL_PATH} "
-            f"--output_dir {ASR_CT2_DIR.name} --quantization int8"
-        )
-    whisper_processor = WhisperProcessor.from_pretrained(ASR_MODEL_PATH)
-    asr_model = ctranslate2.models.Whisper(str(ASR_CT2_DIR), device=DEVICE)
-
     log("Loading EnViT5 tokenizer + CT2 translator...")
     if not TRANSLATE_CT2_DIR.exists():
         raise FileNotFoundError(
@@ -298,8 +294,6 @@ def _load_all_models(llama_server_bin=LLAMA_SERVER_BIN, llama_hf_repo=LLAMA_HF_R
 
     log("All models loaded.\n")
     return {
-        "whisper_processor": whisper_processor,
-        "asr_model": asr_model,
         "translate_tokenizer": translate_tokenizer,
         "translate_model": translate_model,
         "llama_url": llama_url,
@@ -327,26 +321,6 @@ def _image_to_data_url(img: Image.Image) -> str:
     return f"data:image/jpeg;base64,{encoded}"
 
 
-def speech_to_text_vi(audio_path: Path) -> str:
-    processor = MODELS["whisper_processor"]
-    model = MODELS["asr_model"]
-
-    audio, _ = librosa.load(str(audio_path), sr=ASR_SAMPLE_RATE, mono=True)
-    features_np = processor.feature_extractor(
-        audio, sampling_rate=ASR_SAMPLE_RATE, return_tensors="np"
-    ).input_features.astype("float32")
-    features = ctranslate2.StorageView.from_array(features_np)
-
-    prompt = processor.tokenizer.convert_tokens_to_ids(
-        ["<|startoftranscript|>", "<|vi|>", "<|transcribe|>", "<|notimestamps|>"]
-    )
-    results = model.generate(
-        features, [prompt], beam_size=1, max_length=ASR_MAX_LENGTH
-    )
-    token_ids = results[0].sequences_ids[0]
-    return processor.tokenizer.decode(token_ids, skip_special_tokens=True).strip()
-
-
 def translate(text: str, src_lang: str) -> str:
     tokenizer = MODELS["translate_tokenizer"]
     translator = MODELS["translate_model"]
@@ -364,14 +338,6 @@ def translate(text: str, src_lang: str) -> str:
     return decoded.split(":", 1)[-1].strip()
 
 
-def make_concise_prompt(user_prompt: str) -> str:
-    return (
-        f"{user_prompt} "
-        "Answer in 1 simple, complete sentence (max ~30 words). "
-        "Be concise but cover the most important details."
-    )
-
-
 def clean_truncated_text(text: str, was_truncated: bool) -> str:
     text = text.strip()
     if not was_truncated:
@@ -384,9 +350,10 @@ def clean_truncated_text(text: str, was_truncated: bool) -> str:
 
 
 def describe_scene(image: Image.Image, prompt_en: str) -> str:
-    """Vision-language step, now backed by the quantized SmolVLM2 GGUF model
-    served by llama-server, called over its OpenAI-compatible chat endpoint
-    (mirrors the notebook's function1_chatbot request shape)."""
+    """Vision-language step, backed by the quantized SmolVLM2 GGUF model
+    served by llama-server, called over its OpenAI-compatible chat endpoint.
+    Describes the scene/objects for a blind user and warns about hazards
+    (doors, stairs, obstacles, etc.) ahead when present."""
     llama_url = MODELS["llama_url"]
     image = resize_image(image)
     data_url = _image_to_data_url(image)
@@ -396,8 +363,7 @@ def describe_scene(image: Image.Image, prompt_en: str) -> str:
         "messages": [
             {
                 "role": "system",
-                "content": "Answer in 2 simple, complete sentences (max ~30 words) "
-                            "Be concise but cover the most important details.",
+                "content": VLM_SYSTEM_PROMPT,
             },
             {
                 "role": "user",
@@ -429,22 +395,16 @@ def speak_vi(text: str, out_path: Path):
 
 
 # ---------- One end-to-end query ----------
-def run_query(image_path: Path, audio_path: Path, out_path: Path):
+def run_query(image_path: Path, out_path: Path):
     if not image_path.exists():
         raise FileNotFoundError(f"image not found: {image_path}")
-    if not audio_path.exists():
-        raise FileNotFoundError(f"audio not found: {audio_path}")
 
     img = Image.open(image_path)
 
-    log(f"Transcribing {audio_path} (vi)...")
-    prompt_vi = speech_to_text_vi(audio_path)
-    print(f"[STT (vi)]      : {prompt_vi}")
+    print(f"[Prompt (vi)]   : {FIXED_PROMPT_VI}")
+    print(f"[Prompt (en)]   : {FIXED_PROMPT_EN}")
 
-    prompt_en = translate(prompt_vi, src_lang="vi")
-    print(f"[Prompt (en)]   : {prompt_en}")
-
-    result_en = describe_scene(img, make_concise_prompt(prompt_en))
+    result_en = describe_scene(img, FIXED_PROMPT_EN)
     print(f"[SmolVLM (en)]  : {result_en}")
 
     result_vi = translate(result_en, src_lang="en")
@@ -459,15 +419,14 @@ def main():
     global MODELS
 
     parser = argparse.ArgumentParser(
-        description="glass: photo + spoken vi question -> spoken vi answer"
+        description="glass: photo -> fixed vi prompt -> spoken vi scene description + hazard warning"
     )
     parser.add_argument("--image", help="path to the photo, e.g. test/photo/pavement_5.webp")
-    parser.add_argument("--audio", help="path to the spoken vi question, e.g. test/audio/mieu_ta_khung_canh.mp3")
     parser.add_argument("--out", default="out.wav", help="output wav path (default: out.wav)")
     parser.add_argument(
         "--serve", action="store_true",
         help="load all models once, then read JSON lines from stdin "
-             '(each: {"image": "...", "audio": "...", "out": "..."}) '
+             '(each: {"image": "...", "out": "..."}) '
              "until EOF/blank line — avoids reloading models per query.",
     )
     parser.add_argument("--llama-server-bin", default=str(LLAMA_SERVER_BIN),
@@ -497,7 +456,7 @@ def main():
 
     if args.serve:
         log("Serving. Send one JSON object per line on stdin, e.g.:")
-        log('  {"image": "test/photo/pavement_5.webp", "audio": "test/audio/mieu_ta_khung_canh.mp3"}')
+        log('  {"image": "test/photo/pavement_5.webp"}')
         log("Ctrl-D or a blank line to stop.")
         for line in sys.stdin:
             line = line.strip()
@@ -507,17 +466,16 @@ def main():
                 req = json.loads(line)
                 run_query(
                     Path(req["image"]),
-                    Path(req["audio"]),
                     Path(req.get("out", "out.wav")),
                 )
             except Exception as e:
                 log(f"error handling request: {e!r}")
         return
 
-    if not args.image or not args.audio:
-        parser.error("--image and --audio are required unless --serve is used")
+    if not args.image:
+        parser.error("--image is required unless --serve is used")
 
-    run_query(Path(args.image), Path(args.audio), Path(args.out))
+    run_query(Path(args.image), Path(args.out))
 
 
 if __name__ == "__main__":
