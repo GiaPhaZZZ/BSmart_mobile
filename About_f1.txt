@@ -1,0 +1,7 @@
+This funtion is use for classification only:
++ take in 1 images
++ Run model
++ Output label
++ Read corresponging audio
+
+python F1_detect_money.py test/photo/20000.jpg

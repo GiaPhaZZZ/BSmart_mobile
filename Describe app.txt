@@ -4,6 +4,7 @@ _ Thực hiện 3 mode chính :
 + mode 1 : detect tiền qua yolo26s
 + mode 2 : miêu tả khung cảnh trước mặt = smolvlm2 (fix prompt)
 + mode 3 : quét qr tới ngân hàng
+=> Khi chuyển đổi giữa các mode (1-2-3-1) thì sẽ đọc audio ở folder speaking theo mode tương ứng f1.mp3 ...
 
 _ Bản thân khi vào app thì sẽ luôn vào chế độ chụp đầu tiên, tự vận hành được. Thao tác đổi bằng mode bằng nút hoặc các thành phần phụ sẽ là ưu tiên sau.
 

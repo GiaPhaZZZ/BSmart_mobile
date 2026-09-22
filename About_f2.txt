@@ -27,5 +27,5 @@ cmake --build build --config Release -j $(nproc) --target llama-server
 4. Run the fix python file
 
 cd ..
-python Function1_chatbot_fix.py --image test/photo/japan.jpeg --audio test/audio/mieu_ta_khung_canh.mp3
+python F2_describe_scene.py --image test/photo/japan.jpeg
 

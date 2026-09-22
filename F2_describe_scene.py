@@ -80,8 +80,8 @@ ENVIT5_TOKENIZER_CACHE = BASE_DIR / ".cache" / "envit5_patched"
 PIPER_VOICE_PATH = BASE_DIR / "voices" / "vi_VN-vais1000-medium.onnx"
 
 # Fixed prompt: speech input/ASR is gone, this is the only question asked.
-FIXED_PROMPT_VI = "mieu ta khung canh phia truoc"
-FIXED_PROMPT_EN = "Describe the scene ahead of me."
+FIXED_PROMPT_VI = "miêu tả khung cảnh phía trước bằng 2-3 câu hoàn chỉnh."
+FIXED_PROMPT_EN = "Describe the scene ahead of me in a 2-3 sentences."
 
 # --- Quantized SmolVLM2 served via llama.cpp's llama-server ---
 # Easiest path: let llama-server auto-download the GGUF (+ mmproj) from Hugging
